@@ -90,7 +90,7 @@ Pod::Spec.new do |s|
   #
 
   s.source_files  = "lib/*","lib/**/*"
-  s.exclude_files = "lib/extentions/xml/*","lib/extentions/SQLite/*"
+  s.exclude_files = "lib/extentions/xml/*.{h,m}","lib/extentions/SQLite/*.{h,m}"
 
   # s.public_header_files = "Classes/**/*.h"
 
