@@ -81,6 +81,7 @@ wax_instance_userdata *wax_instance_create(lua_State *L, id instance, BOOL isCla
     instanceUserdata->isClass = isClass;
     instanceUserdata->isSuper = nil;
 	instanceUserdata->actAsSuper = NO;
+    instanceUserdata->waxRetain = NO;
      
     if (!isClass) {
         //wax_log(LOG_GC, @"Retaining %@ for %@(%p -> %p)", isClass ? @"class" : @"instance", [instance class], instance, instanceUserdata);
@@ -129,6 +130,7 @@ wax_instance_userdata *wax_instance_createSuper(lua_State *L, wax_instance_userd
     superInstanceUserdata->instance = instanceUserdata->instance;
     superInstanceUserdata->isClass = instanceUserdata->isClass;
 	superInstanceUserdata->actAsSuper = YES;
+    superInstanceUserdata->waxRetain = NO;
 	
 	// isSuper not only stores whether the class is a super, but it also contains the value of the next superClass
 	if (instanceUserdata->isSuper) {
@@ -216,8 +218,14 @@ BOOL wax_instance_pushFunction(lua_State *L, id self, SEL selector) {
     
     wax_instance_pushUserdata(L, self);
     if (lua_isnil(L, -1)) {
-        END_STACK_MODIFY(L, 0)
-        return NO; // userdata doesn't exist
+        // TODO:
+        // quick and dirty solution to let obj-c call directly into lua
+        // cause a obj-c leak, should we release it later?
+        wax_instance_userdata *data = wax_instance_create(L, self, NO);
+        data->waxRetain = YES;
+//        [self release];
+//        END_STACK_MODIFY(L, 0)
+//        return NO; // userdata doesn't exist
     }
     
     lua_getfenv(L, -1);
@@ -768,10 +776,41 @@ static BOOL overrideMethod(lua_State *L, wax_instance_userdata *instanceUserdata
                 break;
         }
 		
-		id metaclass = objc_getMetaClass(object_getClassName(klass));		
-		success = class_addMethod(klass, selector, imp, typeDescription) && class_addMethod(metaclass, selector, imp, typeDescription);
-		
-        if (returnType) free(returnType);                
+        // OVERRIDE if exists
+		id metaclass = objc_getMetaClass(object_getClassName(klass));
+//        success = class_addMethod(klass, selector, imp, typeDescription) && class_addMethod(metaclass, selector, imp, typeDescription);
+
+        IMP instImp = class_respondsToSelector(klass, selector) ? class_getMethodImplementation(klass, selector) : NULL;
+        IMP metaImp = class_respondsToSelector(metaclass, selector) ? class_getMethodImplementation(metaclass, selector) : NULL;
+        if(instImp) {
+            // original selector is reserved in ORIGxxxx
+            IMP prevImp = class_replaceMethod(klass, selector, imp, typeDescription);
+            const char *selectorName = sel_getName(selector);
+            char newSelectorName[strlen(selectorName) + 10];
+            strcpy(newSelectorName, "ORIG");
+            strcat(newSelectorName, selectorName);
+            SEL newSelector = sel_getUid(newSelectorName);
+            if(!class_respondsToSelector(klass, newSelector)) {
+                class_addMethod(klass, newSelector, prevImp, typeDescription);
+            }
+            success = YES;
+        } else if(metaImp) {
+            IMP prevImp = class_replaceMethod(metaclass, selector, imp, typeDescription);
+            const char *selectorName = sel_getName(selector);
+            char newSelectorName[strlen(selectorName) + 10];
+            strcpy(newSelectorName, "ORIG");
+            strcat(newSelectorName, selectorName);
+            SEL newSelector = sel_getUid(newSelectorName);
+            if(!class_respondsToSelector(metaclass, newSelector)) {
+                class_addMethod(metaclass, newSelector, prevImp, typeDescription);
+            }
+            success = YES;
+        } else {
+            // add to both instance and class method
+            success = class_addMethod(klass, selector, imp, typeDescription) && class_addMethod(metaclass, selector, imp, typeDescription);
+        }
+        
+        if (returnType) free(returnType);
     }
     else {
 		SEL possibleSelectors[2];
@@ -797,9 +836,38 @@ static BOOL overrideMethod(lua_State *L, wax_instance_userdata *instanceUserdata
 			IMP imp = (IMP)WAX_METHOD_NAME(id);
 			id metaclass = objc_getMetaClass(object_getClassName(klass));
 
-			success = success &&
-				class_addMethod(klass, possibleSelectors[i], imp, typeDescription) &&
-				class_addMethod(metaclass, possibleSelectors[i], imp, typeDescription);
+//            success = class_addMethod(klass, possibleSelectors[i], imp, typeDescription) &&
+//				class_addMethod(metaclass, possibleSelectors[i], imp, typeDescription);
+            
+            IMP instImp = class_respondsToSelector(klass, selector) ? class_getMethodImplementation(klass, selector) : NULL;
+            IMP metaImp = class_respondsToSelector(metaclass, selector) ? class_getMethodImplementation(metaclass, selector) : NULL;
+            if(instImp) {
+                // original selector is reserved in ORIGxxxx
+                IMP prevImp = class_replaceMethod(klass, selector, imp, typeDescription);
+                const char *selectorName = sel_getName(selector);
+                char newSelectorName[strlen(selectorName) + 10];
+                strcpy(newSelectorName, "ORIG");
+                strcat(newSelectorName, selectorName);
+                SEL newSelector = sel_getUid(newSelectorName);
+                if(!class_respondsToSelector(klass, newSelector)) {
+                    class_addMethod(klass, newSelector, prevImp, typeDescription);
+                }
+                success = YES;
+            } else if(metaImp) {
+                IMP prevImp = class_replaceMethod(metaclass, selector, imp, typeDescription);
+                const char *selectorName = sel_getName(selector);
+                char newSelectorName[strlen(selectorName) + 10];
+                strcpy(newSelectorName, "ORIG");
+                strcat(newSelectorName, selectorName);
+                SEL newSelector = sel_getUid(newSelectorName);
+                if(!class_respondsToSelector(metaclass, newSelector)) {
+                    class_addMethod(metaclass, newSelector, prevImp, typeDescription);
+                }
+                success = YES;
+            } else {
+                // add to both instance and class method
+                success = class_addMethod(klass, selector, imp, typeDescription) && class_addMethod(metaclass, selector, imp, typeDescription);
+            }
 			
 			free(typeDescription);
 		}
